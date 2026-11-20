@@ -1,0 +1,126 @@
+# Publishes the shared pages and removes the ones that expired.
+#
+#   1. test    — the scripts decide what gets deleted, so they must pass first
+#   2. purge   — delete expired / invalid share folders from the private data repository
+#   3. build   — assemble the site from an allowlist (viewer page, meta.json, one data file per share)
+#   4. deploy  — GitHub Pages, then delete the uploaded artifact
+#
+# This repository is public. Rules for this file:
+#   - no pull_request triggers: the job holds a write key for the data repository
+#   - share ids must not reach the log (scripts print counts only, tar runs without -v)
+#   - actions are pinned to commit SHAs
+name: deploy
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 03:10 KST every day. The service also dispatches this workflow when a share is created,
+    # changed, revoked or found expired; the schedule covers the case where the service is down.
+    - cron: "10 18 * * *"
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  deploy:
+    # Scheduled and dispatched runs use the default branch; refuse anything else.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: write # delete the Pages artifact, keep this workflow enabled
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test
+        run: npm test
+
+      # The deploy key exists on disk only inside this step.
+      - name: Purge expired shares
+        env:
+          DEPLOY_KEY: ${{ secrets.DATA_REPO_DEPLOY_KEY }}
+          DATA_REPO: git@github.com:neurocore-ai/shared-report-data.git
+        run: |
+          set -euo pipefail
+          ssh_dir="$RUNNER_TEMP/data-ssh"
+          trap 'rm -rf "$ssh_dir"' EXIT
+          install -m 700 -d "$ssh_dir"
+          printf '%s\n' "$DEPLOY_KEY" > "$ssh_dir/key"
+          chmod 600 "$ssh_dir/key"
+          # github.com host key (https://api.github.com/meta, ssh_keys)
+          printf '%s\n' "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $ssh_dir/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_dir/known_hosts -o StrictHostKeyChecking=yes"
+
+          git clone --quiet --depth 1 --branch main "$DATA_REPO" data
+
+          # The service commits to the same branch. Never force-push: if the push is rejected,
+          # take the new state and decide again.
+          for attempt in 1 2 3; do
+            node scripts/purge.mjs --data data/d
+            if [ -z "$(git -C data status --porcelain)" ]; then
+              break
+            fi
+            git -C data add -A
+            git -C data -c user.name="shared-report-deploy" -c user.email="shared-report-deploy@users.noreply.github.com" \
+              commit --quiet -m "purge expired shares"
+            if git -C data push --quiet origin HEAD:main; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::could not push the purge after 3 attempts"
+              exit 1
+            fi
+            git -C data fetch --quiet --depth 1 origin main
+            git -C data reset --quiet --hard origin/main
+          done
+
+      - name: Build site
+        run: |
+          set -euo pipefail
+          node scripts/build-site.mjs --data data/d --out _site
+          rm -rf data
+          # Same archive layout as actions/upload-pages-artifact, but without -v:
+          # that action lists every path, which would put share ids into this public log.
+          tar --dereference --hard-dereference --directory _site \
+            -cf "$RUNNER_TEMP/artifact.tar" --exclude=.git --exclude=.github .
+
+      - name: Upload Pages artifact
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+      # The artifact holds every published share. Remove it as soon as the deployment has read it.
+      - name: Delete Pages artifact
+        if: always() && steps.upload.outputs.artifact-id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID"
+
+      # Scheduled workflows in public repositories are disabled after 60 days without activity.
+      # This is a second line of defence; the service re-enables the workflow when a dispatch is refused.
+      - name: Keep the schedule enabled
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/deploy.yml/enable" || true
