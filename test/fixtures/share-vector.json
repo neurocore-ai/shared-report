@@ -1,0 +1,8 @@
+{
+  "shareId": "VectorShareId000000001",
+  "password": "vector-password-not-a-real-secret",
+  "iter": 600000,
+  "salt": "BdWSqIzSRkka55V2KdAdFg==",
+  "dataB64": "lA0jET1uHD7eoxIvtRMwfn2RIpgBgw1S8IvQF3FzRCqISSfnPPQPsDrSZi2OhsICB8/IDTzqzXm3ty4o6FmPezGmGAaAzfbpit9Vokyysb0eMkWZhKjhZEvmdtCnJuj4no8vFhjsD7PttMGQApoHLvA+l8hXO791/wBa0vlWbaTEb2/eqURUh3o=",
+  "plaintext": "<!DOCTYPE html><html><head><title>벡터 문서</title></head><body><h1>한글 🙂 vector</h1></body></html>"
+}

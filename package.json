@@ -1,0 +1,9 @@
+{
+  "name": "shared-report",
+  "private": true,
+  "type": "module",
+  "description": "Password-protected shared pages: viewer, site build scripts and deploy workflow",
+  "scripts": {
+    "test": "node --test"
+  }
+}
